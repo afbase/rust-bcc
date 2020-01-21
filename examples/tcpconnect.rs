@@ -1,6 +1,5 @@
 use bcc::core::BPF;
 use bcc::table::Table;
-use std::sys_common::net::hntohs;
 use std::collections::HashMap;
 use std::{thread, time};
 use std::net::{IPv4Addr, IPv6Addr};
@@ -10,16 +9,11 @@ use std::process;
 use core::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::{fmt, mem, ptr, thread, time};
+use std::num::Int;
 
 extern crate ctrlc;
 #[macro_use]
 extern crate lazy_static;
-
-lazy_static! {
-    let mut TIMESTAMP_ARGUMENT: bool = false;
-    let mut UID_ARGUMENT: bool = false;
-    let mut START_TIMESTAMP: u64 = 0;
-}
 /*
  * Define the struct the BPF code writes in Rust
  * This must match the struct in `opensnoop.c` exactly.
@@ -51,50 +45,66 @@ struct ipv6_data_t {
 }
 
 const DEBUG: bool = false;
-const TIMESTAMP_DIVISOR = 1000000;
+const TIMESTAMP_DIVISOR: f64 = 1000000.0;
+static mut TIMESTAMP_ARGUMENT: bool = false;
+static mut UID_ARGUMENT: bool = false;
+static mut START_TIMESTAMP: u64 = 0;
 // lazy borrowing from tcpconnect.py
 lazy_static!{
-static ref struct_init: HashMap<&str, HashMap<&str, &str>> = [
-("ipv4",
-    [("count",
-        "struct ipv4_flow_key_t flow_key = {};
-        flow_key.saddr = skp->__sk_common.skc_rcv_saddr;
-        flow_key.daddr = skp->__sk_common.skc_daddr;
-        flow_key.dport = ntohs(dport);
-        ipv4_count.increment(flow_key);"),
-    ("trace",
-        "struct ipv4_data_t data4 = {.pid = pid, .ip = ipver};
-        data4.uid = bpf_get_current_uid_gid();
-        data4.ts_us = bpf_ktime_get_ns() / 1000;
-        data4.saddr = skp->__sk_common.skc_rcv_saddr;
-        data4.daddr = skp->__sk_common.skc_daddr;
-        data4.dport = ntohs(dport);
-        bpf_get_current_comm(&data4.task, sizeof(data4.task));
-        ipv4_events.perf_submit(ctx, &data4, sizeof(data4));")].iter().cloned().collect(),
-"ipv6",
-    [("count",
-        "struct ipv6_flow_key_t flow_key = {};
-        bpf_probe_read(&flow_key.saddr, sizeof(flow_key.saddr),
-           skp->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
-        bpf_probe_read(&flow_key.daddr, sizeof(flow_key.daddr),
-           skp->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
-        flow_key.dport = ntohs(dport);
-        ipv6_count.increment(flow_key);"),
-    ("trace",
-        "struct ipv6_data_t data6 = {.pid = pid, .ip = ipver};
-        data6.uid = bpf_get_current_uid_gid();
-        data6.ts_us = bpf_ktime_get_ns() / 1000;
-        bpf_probe_read(&data6.saddr, sizeof(data6.saddr),
-           skp->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
-        bpf_probe_read(&data6.daddr, sizeof(data6.daddr),
-           skp->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
-        data6.dport = ntohs(dport);
-        bpf_get_current_comm(&data6.task, sizeof(data6.task));
-        ipv6_events.perf_submit(ctx, &data6, sizeof(data6));")].iter().cloned().collect()].iter().cloned().collect()
+    static ref STRUCT_INIT: HashMap<&'static str, HashMap<&'static str, &'static str>> = {
+        let IPV4: HashMap<&'static str, &'static str> = {
+                let mut m: HashMap<&'static str, &'static str> = HashMap::new();
+                m.insert("count", "struct ipv4_flow_key_t flow_key = {};
+                flow_key.saddr = skp->__sk_common.skc_rcv_saddr;
+                flow_key.daddr = skp->__sk_common.skc_daddr;
+                flow_key.dport = ntohs(dport);
+                ipv4_count.increment(flow_key);");
+                m.insert("trace", "struct ipv4_data_t data4 = {.pid = pid, .ip = ipver};
+                data4.uid = bpf_get_current_uid_gid();
+                data4.ts_us = bpf_ktime_get_ns() / 1000;
+                data4.saddr = skp->__sk_common.skc_rcv_saddr;
+                data4.daddr = skp->__sk_common.skc_daddr;
+                data4.dport = ntohs(dport);
+                bpf_get_current_comm(&data4.task, sizeof(data4.task));
+                ipv4_events.perf_submit(ctx, &data4, sizeof(data4));");
+                m
+        };
+        let IPV6: HashMap<&'static str, &'static str> = {
+            let mut m: HashMap<&'static str, &'static str> = HashMap::new();
+            m.insert("count", "struct ipv6_flow_key_t flow_key = {};
+            bpf_probe_read(&flow_key.saddr, sizeof(flow_key.saddr),
+            skp->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
+            bpf_probe_read(&flow_key.daddr, sizeof(flow_key.daddr),
+            skp->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
+            flow_key.dport = ntohs(dport);
+            ipv6_count.increment(flow_key);");
+            m.insert("trace", "struct ipv6_data_t data6 = {.pid = pid, .ip = ipver};
+            data6.uid = bpf_get_current_uid_gid();
+            data6.ts_us = bpf_ktime_get_ns() / 1000;
+            bpf_probe_read(&data6.saddr, sizeof(data6.saddr),
+            skp->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
+            bpf_probe_read(&data6.daddr, sizeof(data6.daddr),
+            skp->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
+            data6.dport = ntohs(dport);
+            bpf_get_current_comm(&data6.task, sizeof(data6.task));
+            ipv6_events.perf_submit(ctx, &data6, sizeof(data6));");
+            m
+        };
+        let mut m: HashMap<&'static str, HashMap<&'static str, &'static str>> = HashMap::new();
+        m.insert("ipv4", IPV4);
+        m.insert("ipv6", IPV6);
+        m
+    };
+}
+pub fn htons(u: u16) -> u16 {
+    u.to_be()
+}
+pub fn ntohs(u: u16) -> u16 {
+    Int::from_be(u)
 }
 
-fn hashmap_replace(first_key: &str, second_key: &str, replacement_string: &str, bpf_text: mut &str){
-    match struct_init.get(first_key) {
+fn hashmap_replace(first_key: &str, second_key: &str, replacement_string: &str, bpf_text: &mut str){
+    match STRUCT_INIT.get(first_key) {
         Some(&code_hash_map) => {
             match code_hash_map.get(second_key) {
                 Some(&code) => {
@@ -111,7 +121,7 @@ fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
     let mut bpf_text = include_str!("tcpconnect.c");
     let matches = App::new("tcpconnect")
         .about("Trace TCP connects")
-        .longabout("examples:
+        .long_about("examples:
 ./tcpconnect           # trace all TCP connect()s
 ./tcpconnect -t        # include timestamps
 ./tcpconnect -p 181    # only trace PID 181
@@ -122,7 +132,7 @@ fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
 // ./tcpconnect -c        # count connects per src ip and dest ip/port")
         .arg(
             Arg::with_name("t")
-            .longname("timestamp")
+            .long("timestamp")
             .takes_value(false)
             .help("include timestamp on output")
         )
@@ -142,14 +152,14 @@ fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
         )
         .arg(
             Arg::with_name("U")
-            .longname("print-uid")
+            .long("print-uid")
             .help("include UID on output")
             .value_name("print-uid")
             .takes_value(false)
         )
         .arg(
             Arg::with_name("u")
-            .longname("uid")
+            .long("uid")
             .help("trace this UID only")
             .value_name("UID")
             .number_of_values(1)
@@ -165,44 +175,44 @@ fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
         .arg(
             Arg::with_name("ebpf")
             .takes_value(false)
-        );
+        ).get_matches();
         // start replacing BPF code in bpf_text
         let count = false;// matches.is_present("c");
         TIMESTAMP_ARGUMENT = matches.is_present("t");
         if count {
-            hashmap_replace(&"ipv4", &"count", &"IPV4_CODE", &bpf_text);
-            hashmap_replace(&"ipv6", &"count", &"IPV6_CODE", &bpf_text);
+            hashmap_replace(&"ipv4", &"count", &"IPV4_CODE", &mut bpf_text);
+            hashmap_replace(&"ipv6", &"count", &"IPV6_CODE", &mut bpf_text);
         }
         else{
-            hashmap_replace(&"ipv4", &"trace", &"IPV4_CODE", &bpf_text);
-            hashmap_replace(&"ipv6", &"trace", &"IPV6_CODE", &bpf_text);
+            hashmap_replace(&"ipv4", &"trace", &"IPV4_CODE", &mut bpf_text);
+            hashmap_replace(&"ipv6", &"trace", &"IPV6_CODE", &mut bpf_text);
         }
         UID_ARGUMENT = matches.is_present("U");
         let ebpf = matches.is_present("ebpf");
         if let Some(p) = matches.value_of("p") {
             // trace pid
-            let pid = p.parse::<u32>();
+            let pid = p.parse::<u32>().unwrap();
             bpf_text.replace("FILTER_PID",
-            format!("if (pid != %s) { return 0; }", pid);
+            format!("if (pid != {}) {{ return 0; }}", pid).as_str());
         }
-        if let Some(P) = matches.value_of("P") {
+        if let Some(P) = matches.values_of("P") {
             // trace ports
-            let ports_conditions: Vec<str> = P.collect().map(|v| format!("dport != %d", ntohs(v.parse::<u16>())));
+            let ports_conditions: Vec<&str> = P.collect().map(|v| format!("dport != {}", ntohs(v.parse::<u16>().unwrap())).as_str());
             let port_contition_statement = ports_conditions.join(" && ");
-            bpf_text.replace("FILTER_PORT", format!("if (%s) { currsock.delete(&pid); return 0; }",port_contition_statement));
+            bpf_text.replace("FILTER_PORT", format!("if ({}) {{ currsock.delete(&pid); return 0; }}", port_contition_statement).as_str());
         }
         if let Some(u) = matches.value_of("u") {
             // trace uuid
-            let uuid = u.parse::<u32>();
-            bpf_text.replace("FILTER_UID", format!("if (uid != %s) { return 0; }",uuid);
+            let uuid = u.parse::<u32>().unwrap();
+            bpf_text.replace("FILTER_UID", format!("if (uid != {}) {{ return 0; }}",uuid).as_str());
         }
         bpf_text.replace("FILTER_PID", "");
         bpf_text.replace("FILTER_PORT", "");
         bpf_text.replace("FILTER_UID", "");
 
         //debug or display ebpf code
-        if (DEBUG || ebpf) {
-            println!(bpf_text);
+        if DEBUG || ebpf {
+            println!(&bpf_text);
             if ebpf {
                 process::exit(0x0100);
             }
@@ -211,10 +221,10 @@ fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
         // compile the above BPF code!
         let mut module = BPF::new(bpf_text)?;
         // load + attach tracepoints!
-        let trace_connect_v4_entry = module.load_kprobe("trace_connect_entry");
-        let trace_connect_v6_entry = module.load_kprobe("trace_connect_entry");
-        let trace_connect_v4_return = module.load_kprobe("trace_connect_v4_return");
-        let trace_connect_v6_return = module.load_kprobe("trace_connect_v6_return");
+        let trace_connect_v4_entry = module.load_kprobe("trace_connect_entry")?;
+        let trace_connect_v6_entry = module.load_kprobe("trace_connect_entry")?;
+        let trace_connect_v4_return = module.load_kprobe("trace_connect_v4_return")?;
+        let trace_connect_v6_return = module.load_kprobe("trace_connect_v6_return")?;
         module.attach_kprobe("tcp_v4_connect", trace_connect_v4_entry)?;
         module.attach_kprobe("tcp_v6_connect", trace_connect_v6_entry)?;
         module.attach_kretprobe("tcp_v4_connect", trace_connect_v4_return)?;
@@ -239,18 +249,18 @@ fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
         // }
         let ipv4_table = module.table("ipv4_events");
         let ipv6_table = module.table("ipv6_events");
-        let mut ipv4_perf_map = init_perf_map(ipv4_table, print_ipv4_event)?;
-        let mut ipv6_perf_map = init_perf_map(ipv6_table, print_ipv6_event)?;
+        let mut ipv4_perf_map = bpf.init_perf_map(ipv4_table, perf_ipv4_data_t_callback)?;
+        let mut ipv6_perf_map = bpf.init_perf_map(ipv6_table, perf_ipv6_data_t_callback)?;
         // print a header
-        let mut header = "";
+        let mut header = "".to_string();
         if TIMESTAMP_ARGUMENT {
-            header += println!("{:-9}", "TIME(s)");
+            header.push_str(format!("{:-9}", "TIME(s)").as_str());
         }
         if UID_ARGUMENT {
-            header += println!("{:-6}", "UID");
+            header.push_str(format!("{:-6}", "UID").as_str());
         }
-        header += println!("{:-6} {:-12} {:-2} {:-16} {:-16} {:-4}", "PID", "COMM", "IP", "SADDR", "DADDR", "DPORT");
-        print!(header);
+        header.push_str(format!("{:-6} {:-12} {:-2} {:-16} {:-16} {:-4}", "PID", "COMM", "IP", "SADDR", "DADDR", "DPORT").as_str());
+        println!(header);
         let start = std::time::Instant::now();
         // this `.poll()` loop is what makes our callback get called
         while runnable.load(Ordering::SeqCst) {
@@ -269,17 +279,17 @@ fn perf_ipv4_data_t_callback() -> Box<FnMut(&[u8]) + Send> {
     Box::new(|x| {
         // This callback
         let data = parse_ipv4_data_t_struct(x);
-        let mut string_format: str = "";
+        let mut string_format = "".to_string();
         let mut timestamp_tmp: f64 = 0.0;
         if TIMESTAMP_ARGUMENT {
             if START_TIMESTAMP == 0 {
                 START_TIMESTAMP = data.ts_us;
             }
-            timestamp_tmp = (data.ts_us - START_TIMESTAMP).parse::f64().unwrap() / TIMESTAMP_DIVISOR;
-            string_format += format!("{:-9.3} ", timestamp_tmp);
+            timestamp_tmp = (data.ts_us - START_TIMESTAMP) as f64 / TIMESTAMP_DIVISOR;
+            string_format.push_str(format!("{:-9.3} ", timestamp_tmp).as_str());
         }
         if UID_ARGUMENT {
-            string_format += format!("{:-6} ", data.uid);
+            string_format.push_str(format!("{:-6} ", data.uid).as_str());
         }
         println!(
             "{:-6} {:-12.12} {:-2} {:-16} {:-16} {:-4}",// "PID", "COMM", "IP", "SADDR", "DADDR", "DPORT"
@@ -297,17 +307,17 @@ fn perf_ipv6_data_t_callback() -> Box<FnMut(&[u8]) + Send> {
     Box::new(|x| {
         // This callback
         let data = parse_ipv6_data_t_struct(x);
-        let mut string_format: str = "";
+        let mut string_format = "".to_string();
         let mut timestamp_tmp: f64 = 0.0;
         if TIMESTAMP_ARGUMENT {
             if START_TIMESTAMP == 0 {
                 START_TIMESTAMP = data.ts_us;
             }
-            timestamp_tmp = (data.ts_us - START_TIMESTAMP).parse::f64().unwrap() / TIMESTAMP_DIVISOR;
-            string_format += format!("{:-9.3} ", timestamp_tmp);
+            timestamp_tmp = (data.ts_us - START_TIMESTAMP) as f64 / TIMESTAMP_DIVISOR;
+            string_format.push_str(format!("{:-9.3} ", timestamp_tmp).as_str());
         }
         if UID_ARGUMENT {
-            string_format += format!("{:-6} ", data.uid);
+            string_format.push_str(format!("{:-6} ", data.uid).as_str());
         }
         println!(
             "{:-6} {:-12} {:-2} {:-16} {:-16} {:-4}",// "PID", "COMM", "IP", "SADDR", "DADDR", "DPORT"
