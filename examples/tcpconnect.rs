@@ -1,15 +1,12 @@
 use bcc::core::BPF;
-use bcc::table::Table;
 use std::collections::HashMap;
-use std::{thread, time};
-use std::net::{IPv4Addr, IPv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use clap::{App, Arg};
 use failure::Error;
 use std::process;
 use core::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::{fmt, mem, ptr, thread, time};
-use std::num::Int;
+use std::{ptr, str};
 
 extern crate ctrlc;
 #[macro_use]
@@ -100,7 +97,7 @@ pub fn htons(u: u16) -> u16 {
     u.to_be()
 }
 pub fn ntohs(u: u16) -> u16 {
-    Int::from_be(u)
+    u16::from_be(u)
 }
 
 fn hashmap_replace(first_key: &str, second_key: &str, replacement_string: &str, bpf_text: &mut str){
@@ -195,9 +192,11 @@ fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
             bpf_text.replace("FILTER_PID",
             format!("if (pid != {}) {{ return 0; }}", pid).as_str());
         }
+        //TODO: values_of is an iterator object for which we need to "if let" each object
         if let Some(P) = matches.values_of("P") {
             // trace ports
-            let ports_conditions: Vec<&str> = P.collect().map(|v| format!("dport != {}", ntohs(v.parse::<u16>().unwrap())).as_str());
+            let mut ports: Vec<&str> = P.collect();
+            let ports_conditions: Vec<&str> = ports.iter().map(|v| format!("dport != {}", ntohs(v.parse::<u16>().unwrap())).as_str()).collect();
             let port_contition_statement = ports_conditions.join(" && ");
             bpf_text.replace("FILTER_PORT", format!("if ({}) {{ currsock.delete(&pid); return 0; }}", port_contition_statement).as_str());
         }
@@ -212,11 +211,15 @@ fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
 
         //debug or display ebpf code
         if DEBUG || ebpf {
-            println!(&bpf_text);
+            println!("{}",bpf_text);
             if ebpf {
                 process::exit(0x0100);
             }
         }
+        // time
+        let duration: Option<std::time::Duration> = matches
+        .value_of("duration")
+        .map(|v| std::time::Duration::new(v.parse().expect("Invalid argument for duration"), 0));
 
         // compile the above BPF code!
         let mut module = BPF::new(bpf_text)?;
@@ -249,8 +252,8 @@ fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
         // }
         let ipv4_table = module.table("ipv4_events");
         let ipv6_table = module.table("ipv6_events");
-        let mut ipv4_perf_map = bpf.init_perf_map(ipv4_table, perf_ipv4_data_t_callback)?;
-        let mut ipv6_perf_map = bpf.init_perf_map(ipv6_table, perf_ipv6_data_t_callback)?;
+        let mut ipv4_perf_map = module.init_perf_map(ipv4_table, perf_ipv4_data_t_callback)?;
+        let mut ipv6_perf_map = module.init_perf_map(ipv6_table, perf_ipv6_data_t_callback)?;
         // print a header
         let mut header = "".to_string();
         if TIMESTAMP_ARGUMENT {
@@ -260,12 +263,11 @@ fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
             header.push_str(format!("{:-6}", "UID").as_str());
         }
         header.push_str(format!("{:-6} {:-12} {:-2} {:-16} {:-16} {:-4}", "PID", "COMM", "IP", "SADDR", "DADDR", "DPORT").as_str());
-        println!(header);
+        println!("{}",header);
         let start = std::time::Instant::now();
         // this `.poll()` loop is what makes our callback get called
         while runnable.load(Ordering::SeqCst) {
-            ipv4_perf_map.poll(200);
-            ipv6_perf_map.poll(200);
+            module.perf_map_poll(200);
             if let Some(d) = duration {
                 if std::time::Instant::now() - start >= d {
                     break;
@@ -291,15 +293,17 @@ fn perf_ipv4_data_t_callback() -> Box<FnMut(&[u8]) + Send> {
         if UID_ARGUMENT {
             string_format.push_str(format!("{:-6} ", data.uid).as_str());
         }
-        println!(
-            "{:-6} {:-12.12} {:-2} {:-16} {:-16} {:-4}",// "PID", "COMM", "IP", "SADDR", "DADDR", "DPORT"
-            data.pid,
-            data.task,
-            data.ip,
-            Ipv4Addr::from(data.saddr),
-            Ipv4Addr::from(data.daddr),
-            data.dport
-        );
+        if let Ok(task) = str::from_utf8(&data.task){
+            println!(
+                "{:-6} {:-12.12} {:-2} {:-16} {:-16} {:-4}",// "PID", "COMM", "IP", "SADDR", "DADDR", "DPORT"
+                data.pid,
+                task,
+                data.ip,
+                Ipv4Addr::from(data.saddr),
+                Ipv4Addr::from(data.daddr),
+                data.dport
+            );
+        }
     })
 }
 
@@ -319,15 +323,17 @@ fn perf_ipv6_data_t_callback() -> Box<FnMut(&[u8]) + Send> {
         if UID_ARGUMENT {
             string_format.push_str(format!("{:-6} ", data.uid).as_str());
         }
-        println!(
-            "{:-6} {:-12} {:-2} {:-16} {:-16} {:-4}",// "PID", "COMM", "IP", "SADDR", "DADDR", "DPORT"
-            data.pid,
-            data.task,
-            data.ip,
-            Ipv6Addr::from(data.saddr),
-            Ipv6Addr::from(data.daddr),
-            data.dport
-        );
+        if let Ok(task) = str::from_utf8(&data.task) {
+            println!(
+                "{:-6} {:-12} {:-2} {:-16} {:-16} {:-4}",// "PID", "COMM", "IP", "SADDR", "DADDR", "DPORT"
+                data.pid,
+                task,
+                data.ip,
+                Ipv6Addr::from(data.saddr),
+                Ipv6Addr::from(data.daddr),
+                data.dport
+            );
+        }
     })
 }
 
