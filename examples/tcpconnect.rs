@@ -194,13 +194,13 @@ fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
         }
         // ports
         let mut port_listings = matches.values_of("P").unwrap();
-        let mut ports_conditions: Vec<&str> = Vec::new();
+        let mut ports_conditions: Vec<String> = Vec::new();
         loop{
             match port_listings.next() {
                 Some(port) => {
                     let port_u16 = port.parse::<u16>().unwrap();
                     let port_ntohs = ntohs(port_u16);
-                    let port_condition = format!("dport != {}", port_ntohs).as_str();
+                    let port_condition = format!("dport != {}", port_ntohs);
                     ports_conditions.push(port_condition);
                 },  
                 None => {break;}
