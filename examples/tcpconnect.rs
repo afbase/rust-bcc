@@ -115,7 +115,7 @@ pub fn ntohs(u: u16) -> u16 {
     u16::from_be(u)
 }
 
-fn hashmap_replace(first_key: &str, second_key: &str, replacement_string: &str, bpf_text: &mut str){
+fn hashmap_replace(first_key: &str, second_key: &str, replacement_string: &str, bpf_text: &mut String){
     match STRUCT_INIT.get(first_key) {
         Some(&code_hash_map) => {
             match code_hash_map.get(second_key) {
@@ -131,7 +131,7 @@ fn hashmap_replace(first_key: &str, second_key: &str, replacement_string: &str, 
 
 fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
     let mut globals = Box::new(GlobalFlags::new(false, false, 0));
-    let mut bpf_text = include_str!("tcpconnect.c");
+    let bpf_text: String = include_str!("tcpconnect.c").to_string();
     let matches = App::new("tcpconnect")
         .about("Trace TCP connects")
         .long_about("examples:
@@ -193,12 +193,12 @@ fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
         let count = false;// matches.is_present("c");
         CONFIG.TIMESTAMP_ARGUMENT = matches.is_present("t");
         if count {
-            hashmap_replace(&"ipv4", &"count", &"IPV4_CODE", bpf_text);
-            hashmap_replace(&"ipv6", &"count", &"IPV6_CODE", bpf_text);
+            hashmap_replace(&"ipv4", &"count", &"IPV4_CODE", &mut bpf_text);
+            hashmap_replace(&"ipv6", &"count", &"IPV6_CODE", &mut bpf_text);
         }
         else{
-            hashmap_replace(&"ipv4", &"trace", &"IPV4_CODE", bpf_text);
-            hashmap_replace(&"ipv6", &"trace", &"IPV6_CODE", bpf_text);
+            hashmap_replace(&"ipv4", &"trace", &"IPV4_CODE", &mut bpf_text);
+            hashmap_replace(&"ipv6", &"trace", &"IPV6_CODE", &mut bpf_text);
         }
         CONFIG.UID_ARGUMENT = matches.is_present("U");
         let ebpf = matches.is_present("ebpf");
@@ -248,7 +248,7 @@ fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
         .map(|v| std::time::Duration::new(v.parse().expect("Invalid argument for duration"), 0));
 
         // compile the above BPF code!
-        let mut module = BPF::new(bpf_text)?;
+        let mut module = BPF::new(bpf_text.as_str())?;
         // load + attach tracepoints!
         let trace_connect_v4_entry = module.load_kprobe("trace_connect_entry")?;
         let trace_connect_v6_entry = module.load_kprobe("trace_connect_entry")?;
@@ -278,8 +278,8 @@ fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
         // }
         let ipv4_table = module.table("ipv4_events");
         let ipv6_table = module.table("ipv6_events");
-        let mut ipv4_perf_map = module.init_perf_map(ipv4_table, perf_ipv4_data_t_callback)?;
-        let mut ipv6_perf_map = module.init_perf_map(ipv6_table, perf_ipv6_data_t_callback)?;
+        let ipv4_perf_map = module.init_perf_map(ipv4_table, perf_ipv4_data_t_callback)?;
+        let ipv6_perf_map = module.init_perf_map(ipv6_table, perf_ipv6_data_t_callback)?;
         // print a header
         let mut header = "".to_string();
         if CONFIG.TIMESTAMP_ARGUMENT {
