@@ -43,11 +43,26 @@ struct ipv6_data_t {
 
 const DEBUG: bool = false;
 const TIMESTAMP_DIVISOR: f64 = 1000000.0;
-static mut TIMESTAMP_ARGUMENT: bool = false;
-static mut UID_ARGUMENT: bool = false;
-static mut START_TIMESTAMP: u64 = 0;
+
+
+struct GlobalFlags {
+    TIMESTAMP_ARGUMENT: bool,
+    UID_ARGUMENT: bool,
+    START_TIMESTAMP: u64
+}
+
+impl GlobalFlags {
+    fn new(timestamp: bool, uid: bool, start: u64) -> GlobalFlags {
+        GlobalFlags{
+            TIMESTAMP_ARGUMENT: timestamp,
+            UID_ARGUMENT: uid,
+            START_TIMESTAMP: start
+        }
+    }
+}
 // lazy borrowing from tcpconnect.py
 lazy_static!{
+    static ref CONFIG: Box<GlobalFlags> = Box::new(GlobalFlags::new(false, false, 0));
     static ref STRUCT_INIT: HashMap<&'static str, HashMap<&'static str, &'static str>> = {
         let IPV4: HashMap<&'static str, &'static str> = {
                 let mut m: HashMap<&'static str, &'static str> = HashMap::new();
@@ -115,6 +130,7 @@ fn hashmap_replace(first_key: &str, second_key: &str, replacement_string: &str, 
 }
 
 fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
+    let mut globals = Box::new(GlobalFlags::new(false, false, 0));
     let mut bpf_text = include_str!("tcpconnect.c");
     let matches = App::new("tcpconnect")
         .about("Trace TCP connects")
@@ -175,30 +191,30 @@ fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
         ).get_matches();
         // start replacing BPF code in bpf_text
         let count = false;// matches.is_present("c");
-        TIMESTAMP_ARGUMENT = matches.is_present("t");
+        CONFIG.TIMESTAMP_ARGUMENT = matches.is_present("t");
         if count {
-            hashmap_replace(&"ipv4", &"count", &"IPV4_CODE", &mut bpf_text);
-            hashmap_replace(&"ipv6", &"count", &"IPV6_CODE", &mut bpf_text);
+            hashmap_replace(&"ipv4", &"count", &"IPV4_CODE", bpf_text);
+            hashmap_replace(&"ipv6", &"count", &"IPV6_CODE", bpf_text);
         }
         else{
-            hashmap_replace(&"ipv4", &"trace", &"IPV4_CODE", &mut bpf_text);
-            hashmap_replace(&"ipv6", &"trace", &"IPV6_CODE", &mut bpf_text);
+            hashmap_replace(&"ipv4", &"trace", &"IPV4_CODE", bpf_text);
+            hashmap_replace(&"ipv6", &"trace", &"IPV6_CODE", bpf_text);
         }
-        UID_ARGUMENT = matches.is_present("U");
+        CONFIG.UID_ARGUMENT = matches.is_present("U");
         let ebpf = matches.is_present("ebpf");
         if let Some(p) = matches.value_of("p") {
             // trace pid
-            let pid = p.parse::<u32>().unwrap();
+            let pid = p.parse::<u32>().expect("pid should be a non-negative integer");
             bpf_text.replace("FILTER_PID",
             format!("if (pid != {}) {{ return 0; }}", pid).as_str());
         }
         // ports
-        let mut port_listings = matches.values_of("P").unwrap();
+        let mut port_listings = matches.values_of("P").expect("comma separated listing of ports, e.g. 1,2,3,80");
         let mut ports_conditions: Vec<String> = Vec::new();
         loop{
             match port_listings.next() {
                 Some(port) => {
-                    let port_u16 = port.parse::<u16>().unwrap();
+                    let port_u16 = port.parse::<u16>().expect("port number between 1-65535");
                     let port_ntohs = ntohs(port_u16);
                     let port_condition = format!("dport != {}", port_ntohs);
                     ports_conditions.push(port_condition);
@@ -212,7 +228,7 @@ fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
         
         if let Some(u) = matches.value_of("u") {
             // trace uuid
-            let uuid = u.parse::<u32>().unwrap();
+            let uuid = u.parse::<u32>().expect("uuid value should be an positive integer");
             bpf_text.replace("FILTER_UID", format!("if (uid != {}) {{ return 0; }}",uuid).as_str());
         }
         bpf_text.replace("FILTER_PID", "");
@@ -266,10 +282,10 @@ fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
         let mut ipv6_perf_map = module.init_perf_map(ipv6_table, perf_ipv6_data_t_callback)?;
         // print a header
         let mut header = "".to_string();
-        if TIMESTAMP_ARGUMENT {
+        if CONFIG.TIMESTAMP_ARGUMENT {
             header.push_str(format!("{:-9}", "TIME(s)").as_str());
         }
-        if UID_ARGUMENT {
+        if CONFIG.UID_ARGUMENT {
             header.push_str(format!("{:-6}", "UID").as_str());
         }
         header.push_str(format!("{:-6} {:-12} {:-2} {:-16} {:-16} {:-4}", "PID", "COMM", "IP", "SADDR", "DADDR", "DPORT").as_str());
@@ -292,15 +308,14 @@ fn perf_ipv4_data_t_callback() -> Box<FnMut(&[u8]) + Send> {
         // This callback
         let data = parse_ipv4_data_t_struct(x);
         let mut string_format = "".to_string();
-        let mut timestamp_tmp: f64 = 0.0;
-        if TIMESTAMP_ARGUMENT {
-            if START_TIMESTAMP == 0 {
-                START_TIMESTAMP = data.ts_us;
+        if CONFIG.TIMESTAMP_ARGUMENT {
+            if CONFIG.START_TIMESTAMP == 0 {
+                CONFIG.START_TIMESTAMP = data.ts_us;
             }
-            timestamp_tmp = (data.ts_us - START_TIMESTAMP) as f64 / TIMESTAMP_DIVISOR;
+            let timestamp_tmp = (data.ts_us - CONFIG.START_TIMESTAMP) as f64 / TIMESTAMP_DIVISOR;
             string_format.push_str(format!("{:-9.3} ", timestamp_tmp).as_str());
         }
-        if UID_ARGUMENT {
+        if CONFIG.UID_ARGUMENT {
             string_format.push_str(format!("{:-6} ", data.uid).as_str());
         }
         if let Ok(task) = str::from_utf8(&data.task){
@@ -322,15 +337,14 @@ fn perf_ipv6_data_t_callback() -> Box<FnMut(&[u8]) + Send> {
         // This callback
         let data = parse_ipv6_data_t_struct(x);
         let mut string_format = "".to_string();
-        let mut timestamp_tmp: f64 = 0.0;
-        if TIMESTAMP_ARGUMENT {
-            if START_TIMESTAMP == 0 {
-                START_TIMESTAMP = data.ts_us;
+        if CONFIG.TIMESTAMP_ARGUMENT {
+            if CONFIG.START_TIMESTAMP == 0 {
+                CONFIG.START_TIMESTAMP = data.ts_us;
             }
-            timestamp_tmp = (data.ts_us - START_TIMESTAMP) as f64 / TIMESTAMP_DIVISOR;
+            let timestamp_tmp = (data.ts_us - CONFIG.START_TIMESTAMP) as f64 / TIMESTAMP_DIVISOR;
             string_format.push_str(format!("{:-9.3} ", timestamp_tmp).as_str());
         }
-        if UID_ARGUMENT {
+        if CONFIG.UID_ARGUMENT {
             string_format.push_str(format!("{:-6} ", data.uid).as_str());
         }
         if let Ok(task) = str::from_utf8(&data.task) {
