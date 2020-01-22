@@ -131,7 +131,7 @@ fn hashmap_replace(first_key: &str, second_key: &str, replacement_string: &str, 
 
 fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
     let mut globals = Box::new(GlobalFlags::new(false, false, 0));
-    let bpf_text: String = include_str!("tcpconnect.c").to_string();
+    let mut bpf_text: String = include_str!("tcpconnect.c").to_string();
     let matches = App::new("tcpconnect")
         .about("Trace TCP connects")
         .long_about("examples:
