@@ -192,14 +192,24 @@ fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
             bpf_text.replace("FILTER_PID",
             format!("if (pid != {}) {{ return 0; }}", pid).as_str());
         }
-        //TODO: values_of is an iterator object for which we need to "if let" each object
-        if let Some(P) = matches.values_of("P") {
-            // trace ports
-            let mut ports: Vec<&str> = P.collect();
-            let ports_conditions: Vec<&str> = ports.iter().map(|v| format!("dport != {}", ntohs(v.parse::<u16>().unwrap())).as_str()).collect();
-            let port_contition_statement = ports_conditions.join(" && ");
-            bpf_text.replace("FILTER_PORT", format!("if ({}) {{ currsock.delete(&pid); return 0; }}", port_contition_statement).as_str());
+        // ports
+        let mut port_listings = matches.values_of("P").unwrap();
+        let mut ports_conditions: Vec<&str> = Vec::new();
+        loop{
+            match port_listings.next() {
+                Some(port) => {
+                    let port_u16 = port.parse::<u16>().unwrap();
+                    let port_ntohs = ntohs(port_u16);
+                    let port_condition = format!("dport != {}", port_ntohs).as_str();
+                    ports_conditions.push(port_condition);
+                },  
+                None => {break;}
+            }
         }
+        // let ports_codnditions: Vec<&str> = ports.iter().map(|v| format!("dport != {}", v).as_str()).collect();
+        let port_contition_statement = ports_conditions.join(" && ");
+        bpf_text.replace("FILTER_PORT", format!("if ({}) {{ currsock.delete(&pid); return 0; }}", port_contition_statement).as_str());
+        
         if let Some(u) = matches.value_of("u") {
             // trace uuid
             let uuid = u.parse::<u32>().unwrap();
@@ -265,7 +275,7 @@ fn do_main(runnable: Arc<AtomicBool>) -> Result<(), Error> {
         header.push_str(format!("{:-6} {:-12} {:-2} {:-16} {:-16} {:-4}", "PID", "COMM", "IP", "SADDR", "DADDR", "DPORT").as_str());
         println!("{}",header);
         let start = std::time::Instant::now();
-        // this `.poll()` loop is what makes our callback get called
+        // this `.poll()` loop is what makes our callbacks get called
         while runnable.load(Ordering::SeqCst) {
             module.perf_map_poll(200);
             if let Some(d) = duration {
